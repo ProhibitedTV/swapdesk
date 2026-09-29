@@ -73,6 +73,14 @@ class SecretBoxTests(unittest.TestCase):
         with self.assertRaisesRegex(secretbox.MalformedEnvelope, "scrypt n="):
             secretbox.parse_header(envelope)
 
+    def test_parse_header_rejects_unknown_kdf(self):
+        envelope, _ = _encrypted()
+        obj = json.loads(envelope)
+        obj["kdf"] = "pbkdf2"
+
+        with self.assertRaisesRegex(secretbox.MalformedEnvelope, "unsupported KDF"):
+            secretbox.parse_header(json.dumps(obj))
+
     def test_decrypt_rejects_invalid_nonce_length(self):
         envelope, key = _encrypted()
         obj = json.loads(envelope)
@@ -97,6 +105,34 @@ class SecretBoxTests(unittest.TestCase):
         obj["kdf_params"]["n"] = 1 << 11
 
         with self.assertRaises(secretbox.BadPassword):
+            secretbox.decrypt(json.dumps(obj), key)
+
+    def test_decrypt_revalidates_format_version_with_cached_key(self):
+        envelope, key = _encrypted()
+        obj = json.loads(envelope)
+        obj["swapdesk_encrypted"] = 2
+
+        with self.assertRaisesRegex(
+            secretbox.MalformedEnvelope, "format version 2"
+        ):
+            secretbox.decrypt(json.dumps(obj), key)
+
+    def test_decrypt_revalidates_kdf_with_cached_key(self):
+        envelope, key = _encrypted()
+        obj = json.loads(envelope)
+        obj["kdf"] = "pbkdf2"
+
+        with self.assertRaisesRegex(secretbox.MalformedEnvelope, "unsupported KDF"):
+            secretbox.decrypt(json.dumps(obj), key)
+
+    def test_decrypt_uses_strict_base64_for_salt_with_cached_key(self):
+        envelope, key = _encrypted()
+        obj = json.loads(envelope)
+        # Python's non-strict b64decode silently ignores this character. The
+        # initial unlock path is strict, and cached-key decrypts must match it.
+        obj["salt"] = obj["salt"][:4] + "!" + obj["salt"][4:]
+
+        with self.assertRaises(secretbox.MalformedEnvelope):
             secretbox.decrypt(json.dumps(obj), key)
 
 
