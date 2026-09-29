@@ -214,17 +214,20 @@ def parse_header(envelope: str) -> tuple[bytes, dict]:
         raise MalformedEnvelope(f"not valid JSON: {e}") from e
     if not isinstance(obj, dict) or _MARKER not in obj:
         raise MalformedEnvelope("missing SwapDesk encryption marker")
-    # The marker doubles as the format version, and it was written but never
-    # read. A future build that changes the envelope layout would have had
-    # every older install report "wrong password" -- the one message that
-    # makes a user reach for the destructive reset. Say what is actually
-    # wrong instead.
+    # The marker doubles as the format version. Rejecting unknown versions
+    # here is also important for decrypt()'s cached-session-key path: a file
+    # can change on disk after the initial unlock, so every read must enforce
+    # the envelope version rather than assuming the first read still applies.
     version = obj.get(_MARKER)
     if version != FORMAT_VERSION:
         raise MalformedEnvelope(
             f"envelope format version {version!r} is not supported by this "
             f"build (expected {FORMAT_VERSION}). This file was written by a "
             f"different version of SwapDesk; upgrade rather than resetting.")
+    kdf_name = obj.get("kdf")
+    if kdf_name != "scrypt":
+        raise MalformedEnvelope(
+            f"unsupported KDF {kdf_name!r}; expected 'scrypt'")
     try:
         salt = base64.b64decode(obj["salt"], validate=True)
         params = dict(obj.get("kdf_params") or {})
@@ -240,19 +243,21 @@ def parse_header(envelope: str) -> tuple[bytes, dict]:
 def decrypt(envelope: str, key: bytes) -> str:
     """Decrypt an envelope with an already-derived `key`. Raises BadPassword
     on an authentication failure (wrong key or tampered file) and
-    MalformedEnvelope on a structurally broken blob."""
+    MalformedEnvelope on a structurally broken blob.
+
+    The full header is revalidated on every call, even when `key` came from a
+    cached session. config.py intentionally reuses that key across saves, and
+    config.enc can be replaced or edited between reads; accepting a cached key
+    must not bypass format/KDF/salt validation performed during unlock().
+    """
     _require()
+    salt, params = parse_header(envelope)
     try:
         obj = json.loads(envelope)
-        salt = base64.b64decode(obj["salt"])
         nonce = base64.b64decode(obj["nonce"], validate=True)
         ct = base64.b64decode(obj["ciphertext"], validate=True)
-        params = dict(obj.get("kdf_params") or {})
     except (ValueError, TypeError, KeyError) as e:
         raise MalformedEnvelope(f"bad envelope: {e}") from e
-    if len(salt) != _SALT_LEN:
-        raise MalformedEnvelope(
-            f"bad envelope: salt is {len(salt)} bytes, expected {_SALT_LEN}")
     if len(ct) < 16:
         raise MalformedEnvelope("bad envelope: ciphertext is too short")
     if len(nonce) != _NONCE_LEN:
@@ -261,14 +266,6 @@ def decrypt(envelope: str, key: bytes) -> str:
         # a structurally broken blob comes back as MalformedEnvelope.
         raise MalformedEnvelope(
             f"bad envelope: nonce is {len(nonce)} bytes, expected {_NONCE_LEN}")
-    # Same reasoning as the nonce check above, for the stored KDF parameters.
-    # _aad() coerces n/r/p/length with int(), so a hand-edited or corrupt
-    # envelope carrying a non-numeric cost parameter raised a bare ValueError
-    # from inside the try below, which only catches InvalidTag: it escaped past
-    # the json/base64 handler and broke the documented contract. unlock() never
-    # saw this because derive_key() range-checks first, but config.py decrypts
-    # directly with a cached session key and does not.
-    _checked_params(params)
     if len(key) not in _AES_KEY_LENS:
         # A key of the wrong size makes AESGCM() itself raise ValueError before
         # any tag is checked. Report it as a malformed envelope (the length
