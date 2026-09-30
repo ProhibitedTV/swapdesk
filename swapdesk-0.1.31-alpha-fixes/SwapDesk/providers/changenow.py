@@ -154,8 +154,20 @@ class ChangeNow(SwapProvider):
         except (ProviderError, requests.RequestException) as e:
             return Quote(self.name, from_coin, to_coin, amount, None, None,
                          error=str(e))
+        if not isinstance(data, dict):
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=(f"{self.name}: estimated-amount endpoint returned "
+                       f"{type(data).__name__}, expected a JSON object."),
+            )
         est = _dec(data.get("toAmount"))
-        rate = (est / amount) if (est is not None and amount) else None
+        if est is None or est <= 0:
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=f"{self.name}: estimated-amount endpoint returned an invalid toAmount.",
+                raw=data,
+            )
+        rate = est / amount
         # Best-effort minimum (separate endpoint; ignore failures).
         mn = None
         with suppress(Exception):
