@@ -197,10 +197,28 @@ class RemoteSwapDesk(SwapProvider):
                     "SwapDesk API returned an unexpected response to the "
                     "key exchange.")
             token = data.get("session_token")
-            if not token:
-                raise ProviderError("SwapDesk API returned no session token.")
+            if not isinstance(token, str):
+                raise ProviderError("SwapDesk API returned an invalid session token.")
+            token = token.strip()
+            if (not token or not token.isprintable()
+                    or any(ch.isspace() for ch in token)):
+                raise ProviderError("SwapDesk API returned an invalid session token.")
+
+            raw_expiry = data.get("expires_at")
+            if raw_expiry in (None, ""):
+                expires_at = 0
+            else:
+                if isinstance(raw_expiry, bool):
+                    raise ProviderError("SwapDesk API returned an invalid session expiry.")
+                try:
+                    expires_at = int(raw_expiry)
+                except (TypeError, ValueError, OverflowError):
+                    raise ProviderError("SwapDesk API returned an invalid session expiry.")
+                if expires_at < 0:
+                    raise ProviderError("SwapDesk API returned an invalid session expiry.")
+
             self._token = token
-            self._token_expires_at = int(data.get("expires_at") or 0)
+            self._token_expires_at = expires_at
             return self._token
 
     def _call(self, method: str, path: str, payload: dict | None = None):
