@@ -197,10 +197,28 @@ class RemoteSwapDesk(SwapProvider):
                     "SwapDesk API returned an unexpected response to the "
                     "key exchange.")
             token = data.get("session_token")
-            if not token:
-                raise ProviderError("SwapDesk API returned no session token.")
+            if not isinstance(token, str):
+                raise ProviderError("SwapDesk API returned an invalid session token.")
+            token = token.strip()
+            if (not token or not token.isprintable()
+                    or any(ch.isspace() for ch in token)):
+                raise ProviderError("SwapDesk API returned an invalid session token.")
+
+            raw_expiry = data.get("expires_at")
+            if raw_expiry in (None, ""):
+                expires_at = 0
+            else:
+                if isinstance(raw_expiry, bool):
+                    raise ProviderError("SwapDesk API returned an invalid session expiry.")
+                try:
+                    expires_at = int(raw_expiry)
+                except (TypeError, ValueError, OverflowError):
+                    raise ProviderError("SwapDesk API returned an invalid session expiry.")
+                if expires_at < 0:
+                    raise ProviderError("SwapDesk API returned an invalid session expiry.")
+
             self._token = token
-            self._token_expires_at = int(data.get("expires_at") or 0)
+            self._token_expires_at = expires_at
             return self._token
 
     def _call(self, method: str, path: str, payload: dict | None = None):
@@ -247,14 +265,36 @@ class RemoteSwapDesk(SwapProvider):
             return Quote(self.name, from_coin, to_coin, amount, None, None,
                          error=str(e))
 
-        rows = data.get("quotes") or []
+        if not isinstance(data, dict):
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=(f"{self.name}: /quote returned {type(data).__name__}, "
+                       f"expected a JSON object."),
+            )
+
+        rows = data.get("quotes")
+        if rows is None:
+            rows = []
+        elif not isinstance(rows, list):
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=(f"{self.name}: /quote returned a non-list 'quotes' "
+                       f"field ({type(rows).__name__})."),
+            )
+
         if not rows:
             # The server distinguishes "no provider routes this pair" from
             # "everything broke", and that distinction drives very different
             # UI copy, so preserve it rather than flattening both to a
-            # generic failure.
+            # generic failure. Treat malformed error entries as ordinary
+            # failures instead of letting e.get(...) escape as AttributeError.
             errors = data.get("errors") or []
-            unsupported = bool(errors) and all(e.get("unsupported") for e in errors)
+            if not isinstance(errors, list):
+                errors = []
+            unsupported = bool(errors) and all(
+                isinstance(e, dict) and bool(e.get("unsupported"))
+                for e in errors
+            )
             msg = (f"{self.name}: no provider on that server routes "
                    f"{from_coin.upper()} to {to_coin.upper()}."
                    if unsupported else
@@ -264,18 +304,53 @@ class RemoteSwapDesk(SwapProvider):
                          error=msg, unsupported=unsupported)
 
         best = rows[0]  # server returns them already ranked best-first
-        self._quote_ids[(from_coin, to_coin, str(amount))] = best.get("quote_id", "")
+        if not isinstance(best, dict):
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=(f"{self.name}: /quote returned a quote entry of type "
+                       f"{type(best).__name__}, expected an object."),
+            )
+
+        quote_id = best.get("quote_id")
+        if (not isinstance(quote_id, str) or not quote_id.strip()
+                or len(quote_id) > 256 or not quote_id.isprintable()):
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=f"{self.name}: /quote returned no usable quote id.",
+            )
+        quote_id = quote_id.strip()
+
+        estimated_receive = _dec(best.get("receive_amount"))
+        rate = _dec(best.get("rate"))
+        if estimated_receive is None or estimated_receive <= 0:
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=(f"{self.name}: /quote returned an invalid receive "
+                       f"amount."),
+            )
+        if rate is None or rate <= 0:
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=f"{self.name}: /quote returned an invalid rate.",
+            )
+
+        self._quote_ids[(from_coin, to_coin, str(amount))] = quote_id
+        via_parts = [
+            value.strip()
+            for value in (best.get("provider"), best.get("via"))
+            if isinstance(value, str) and value.strip()
+        ]
         return Quote(
             provider=self.name,
             from_coin=from_coin,
             to_coin=to_coin,
             send_amount=amount,
-            estimated_receive=_dec(best.get("receive_amount")),
-            rate=_dec(best.get("rate")),
+            estimated_receive=estimated_receive,
+            rate=rate,
             eta_minutes=best.get("eta_minutes"),
             # Two hops to name: the API picked a provider, and that provider
             # may itself be an aggregator that picked an exchange.
-            via=" / ".join(x for x in (best.get("provider"), best.get("via")) if x),
+            via=" / ".join(via_parts) or None,
             raw=best,
         )
 
@@ -372,7 +447,11 @@ class RemoteSwapDesk(SwapProvider):
         # out of history.json, which is a plain file, and a value containing
         # "/" or "?" would otherwise reshape the request path.
         data = self._call("get", f"/swap/status/{quote(str(order_id), safe='')}")
-        raw = str(data.get("status") or "")
+        if not isinstance(data, dict):
+            return STATUS_UNKNOWN
+        raw = data.get("status")
+        if not isinstance(raw, str):
+            return STATUS_UNKNOWN
         # Validated against the app's own vocabulary instead of passed through.
         # Every other provider maps its vendor status through a _MAP with a
         # safe default; this one trusted the server to have normalised
