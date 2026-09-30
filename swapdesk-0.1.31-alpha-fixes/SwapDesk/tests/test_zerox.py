@@ -83,6 +83,57 @@ class ZeroExTests(unittest.TestCase):
         self.assertFalse(quote.ok)
         self.assertIn("add a free API key", quote.error)
 
+    def test_quote_rejects_non_object_price_response(self):
+        provider = ZeroExDEX(api_key="test-key")
+        provider._get = lambda *args, **kwargs: []
+
+        quote = provider.get_quote("USDC", "ETH", "1")
+
+        self.assertFalse(quote.ok)
+        self.assertIn("expected a JSON object", quote.error)
+
+    def test_quote_rejects_missing_zero_and_negative_buy_amount(self):
+        provider = ZeroExDEX(api_key="test-key")
+        for value in (None, "0", "-1", "not-a-number"):
+            with self.subTest(buy_amount=value):
+                provider._get = lambda *args, _value=value, **kwargs: {
+                    "buyAmount": _value,
+                    "sources": [],
+                }
+                quote = provider.get_quote("USDC", "ETH", "1")
+
+                self.assertFalse(quote.ok)
+                self.assertIn("invalid buyAmount", quote.error)
+
+    def test_quote_ignores_malformed_source_rows(self):
+        provider = ZeroExDEX(api_key="test-key")
+        provider._get = lambda *args, **kwargs: {
+            "buyAmount": "1000000000000000000",
+            "sources": [
+                "bad-row",
+                {"name": ["not-a-string"], "proportion": "1"},
+                {"name": "ZeroShare", "proportion": "0"},
+                {"name": " Uniswap_V3 ", "proportion": "1"},
+            ],
+        }
+
+        quote = provider.get_quote("USDC", "ETH", "1")
+
+        self.assertTrue(quote.ok)
+        self.assertEqual(quote.via, "Uniswap_V3")
+
+    def test_quote_ignores_non_list_sources(self):
+        provider = ZeroExDEX(api_key="test-key")
+        provider._get = lambda *args, **kwargs: {
+            "buyAmount": "1000000000000000000",
+            "sources": {"name": "Uniswap_V3", "proportion": "1"},
+        }
+
+        quote = provider.get_quote("USDC", "ETH", "1")
+
+        self.assertTrue(quote.ok)
+        self.assertIsNone(quote.via)
+
 
 if __name__ == "__main__":
     unittest.main()
