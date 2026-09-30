@@ -150,9 +150,15 @@ class SideShift(SwapProvider):
             return Quote(self.name, from_coin, to_coin, amount, None, None,
                          error=self._friendly_error(msg, from_coin, to_coin),
                          unsupported=self._pair_unsupported(msg))
+        if not isinstance(data, dict):
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=(f"{self.name}: unexpected /pair response shape "
+                       f"({type(data).__name__}); expected a JSON object."),
+            )
         # Some errors come back 200 with an "error" field in the body
         # (disabled coin on an otherwise-valid pair).
-        if isinstance(data, dict) and data.get("error"):
+        if data.get("error"):
             err = data["error"]
             msg = err.get("message") if isinstance(err, dict) else str(err)
             return Quote(self.name, from_coin, to_coin, amount, None, None,
@@ -163,8 +169,23 @@ class SideShift(SwapProvider):
         mn = _dec(data.get("min"))
         mx = _dec(data.get("max"))
         est = _dec(data.get("settleAmount"))
+        if rate is not None and rate <= 0:
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=f"{self.name}: /pair returned a non-positive rate.",
+                raw=data,
+            )
         if est is None and rate is not None:
-            est = amount * rate
+            parsed_amount = _dec(amount)
+            if parsed_amount is not None:
+                est = parsed_amount * rate
+        if est is None or est <= 0:
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, rate,
+                min_amount=mn, max_amount=mx,
+                error=f"{self.name}: /pair returned no usable receive estimate.",
+                raw=data,
+            )
         return Quote(self.name, from_coin, to_coin, amount, est, rate,
                      min_amount=mn, max_amount=mx, raw=data)
 
