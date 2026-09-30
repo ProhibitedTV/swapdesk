@@ -100,13 +100,40 @@ class ZeroExDEX(SwapProvider):
         except (ProviderError, requests.RequestException) as e:
             return Quote(self.name, from_coin, to_coin, amount, None, None,
                          error=str(e))
+
+        if not isinstance(data, dict):
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=(f"{self.name}: price endpoint returned "
+                       f"{type(data).__name__}, expected a JSON object."),
+            )
+
         buy_amount = _dec(data.get("buyAmount"))
+        if buy_amount is None or buy_amount <= 0:
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=f"{self.name}: price endpoint returned an invalid buyAmount.",
+                raw=data,
+            )
+
         _, buy_dec = EVM_TOKENS[to_coin]
-        est = (buy_amount / (Decimal(10) ** buy_dec)) if buy_amount is not None else None
-        rate = (est / amount) if (est is not None and amount) else None
+        est = buy_amount / (Decimal(10) ** buy_dec)
+        rate = est / amount
+
         sources = data.get("sources") or []
-        via = ", ".join(s.get("name", "") for s in sources
-                        if _dec(s.get("proportion")) and _dec(s.get("proportion")) > 0) or None
+        if not isinstance(sources, list):
+            sources = []
+        source_names = []
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            proportion = _dec(source.get("proportion"))
+            name = source.get("name")
+            if (proportion is not None and proportion > 0
+                    and isinstance(name, str) and name.strip()):
+                source_names.append(name.strip())
+        via = ", ".join(source_names) or None
+
         return Quote(self.name, from_coin, to_coin, amount, est, rate,
                      via=via, raw=data)
 
