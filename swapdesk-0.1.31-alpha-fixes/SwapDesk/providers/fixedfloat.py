@@ -250,11 +250,30 @@ class FixedFloat(SwapProvider):
             return Quote(self.name, from_coin, to_coin, amount, None, None, error=str(e))
         errs = data.get("errors") or []
         if errs:
+            if (not isinstance(errs, list)
+                    or any(not isinstance(err, str) for err in errs)):
+                return Quote(
+                    self.name, from_coin, to_coin, amount, None, None,
+                    error=f"{self.name}: price response contained malformed errors.",
+                    raw=data,
+                )
             return Quote(self.name, from_coin, to_coin, amount, None, None,
                          error=self._friendly_errors(errs, from_coin, to_coin))
-        frm_obj, to_obj = data.get("from") or {}, data.get("to") or {}
+        frm_obj, to_obj = data.get("from"), data.get("to")
+        if not isinstance(frm_obj, dict) or not isinstance(to_obj, dict):
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=f"{self.name}: price response contained malformed currency legs.",
+                raw=data,
+            )
         est = _dec(to_obj.get("amount"))
-        rate = (est / amount) if (est is not None and amount) else None
+        if est is None or est <= 0:
+            return Quote(
+                self.name, from_coin, to_coin, amount, None, None,
+                error=f"{self.name}: price response returned an invalid receive amount.",
+                raw=data,
+            )
+        rate = est / amount
         return Quote(self.name, from_coin, to_coin, amount, est, rate,
                      min_amount=_dec(frm_obj.get("min")),
                      max_amount=_dec(frm_obj.get("max")), raw=data)
